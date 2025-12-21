@@ -150,12 +150,15 @@ public class ContentExtractorService
                         f.EndsWith(".html", StringComparison.OrdinalIgnoreCase))
             .ToList();
 
-        ProgressChanged?.Invoke($"検索対象ファイル数: {contentFiles.Count}");
+        // 投稿フォルダの一覧を取得（ファイル名からURL抽出用）
+        var postFolders = GetPostFolders(rootFolder);
+
+        ProgressChanged?.Invoke($"検索対象: コンテンツファイル {contentFiles.Count}件, 投稿フォルダ {postFolders.Count}件");
 
         int processed = 0;
         var lockObj = new object();
 
-        // 並列処理で高速化
+        // content.txt/htmlから抽出
         Parallel.ForEach(contentFiles, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, file =>
         {
             try
@@ -171,24 +174,202 @@ public class ContentExtractorService
                 System.Diagnostics.Debug.WriteLine($"ファイル処理エラー: {file} - {ex.Message}");
             }
 
-            // 進捗報告
             lock (lockObj)
             {
                 processed++;
                 if (processed % 100 == 0)
                 {
-                    ProgressChanged?.Invoke($"処理中: {processed}/{contentFiles.Count}");
+                    ProgressChanged?.Invoke($"処理中: {processed}/{contentFiles.Count + postFolders.Count}");
+                }
+            }
+        });
+
+        // 投稿フォルダ内のファイル名からURL抽出（添付ファイルにURLが含まれているケース）
+        Parallel.ForEach(postFolders, new ParallelOptions { MaxDegreeOfParallelism = Environment.ProcessorCount }, folder =>
+        {
+            try
+            {
+                var extracted = ExtractFromFileNames(folder, rootFolder, externalStorageOnly);
+                foreach (var item in extracted)
+                {
+                    results.Add(item);
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"フォルダ処理エラー: {folder} - {ex.Message}");
+            }
+
+            lock (lockObj)
+            {
+                processed++;
+                if (processed % 100 == 0)
+                {
+                    ProgressChanged?.Invoke($"処理中: {processed}/{contentFiles.Count + postFolders.Count}");
                 }
             }
         });
 
         ProgressChanged?.Invoke($"完了: {results.Count}件のURLを抽出");
 
-        // サービス→クリエイター→投稿タイトル順でソート
-        return results.OrderBy(x => x.Service)
-                      .ThenBy(x => x.Creator)
-                      .ThenBy(x => x.PostTitle)
-                      .ToList();
+        // 重複を除去してソート
+        return results
+            .GroupBy(x => x.Url)
+            .Select(g => g.First())
+            .OrderBy(x => x.Service)
+            .ThenBy(x => x.Creator)
+            .ThenBy(x => x.PostTitle)
+            .ToList();
+    }
+
+    /// <summary>
+    /// 投稿フォルダの一覧を取得
+    /// </summary>
+    private List<string> GetPostFolders(string rootFolder)
+    {
+        var postFolders = new List<string>();
+        try
+        {
+            // [service]Creator フォルダを検索
+            var creatorFolders = Directory.GetDirectories(rootFolder)
+                .Where(d => Path.GetFileName(d).StartsWith("["));
+
+            foreach (var creatorFolder in creatorFolders)
+            {
+                // [date] [id] PostTitle フォルダを検索
+                var posts = Directory.GetDirectories(creatorFolder)
+                    .Where(d => Path.GetFileName(d).StartsWith("["));
+                postFolders.AddRange(posts);
+            }
+        }
+        catch { }
+        return postFolders;
+    }
+
+    /// <summary>
+    /// ファイル名からURLを抽出（添付ファイルにURLが埋め込まれているケース用）
+    /// </summary>
+    private List<ExtractedUrl> ExtractFromFileNames(string postFolder, string rootFolder, bool externalStorageOnly)
+    {
+        var results = new List<ExtractedUrl>();
+
+        try
+        {
+            var files = Directory.GetFiles(postFolder);
+            var pathInfo = ParsePathInfoFromFolder(postFolder, rootFolder);
+
+            // ファイル名にURLが含まれているかチェック
+            foreach (var file in files)
+            {
+                var fileName = Path.GetFileNameWithoutExtension(file);
+                
+                // ファイル名からURLを抽出
+                var urls = UrlRegex.Matches(fileName)
+                    .Select(m => CleanUrl(m.Value))
+                    .Distinct()
+                    .ToList();
+
+                // URLを検出できなかった場合、ファイル名自体がURL形式かチェック
+                if (urls.Count == 0 && (fileName.Contains("mega.nz") || fileName.Contains("drive.google") || 
+                    fileName.Contains("dropbox") || fileName.Contains("gofile") || fileName.Contains("iwara")))
+                {
+                    // ファイル名がURLの一部の可能性
+                    var possibleUrl = TryReconstructUrl(fileName);
+                    if (!string.IsNullOrEmpty(possibleUrl))
+                    {
+                        urls.Add(possibleUrl);
+                    }
+                }
+
+                foreach (var url in urls)
+                {
+                    var urlType = GetUrlType(url);
+
+                    if (externalStorageOnly && string.IsNullOrEmpty(urlType))
+                        continue;
+
+                    if (url.Contains("kemono.") || url.Contains("coomer."))
+                        continue;
+
+                    results.Add(new ExtractedUrl
+                    {
+                        Service = pathInfo.service,
+                        Creator = pathInfo.creator,
+                        PostTitle = pathInfo.post,
+                        Url = url,
+                        UrlType = urlType ?? "Other",
+                        Password = "",
+                        SourceFile = file
+                    });
+                }
+            }
+        }
+        catch { }
+
+        return results;
+    }
+
+    /// <summary>
+    /// ファイル名からURLを復元試行
+    /// </summary>
+    private string? TryReconstructUrl(string fileName)
+    {
+        // Megaのパターン: mega.nz/#!xxx または mega.nz/folder/xxx など
+        if (fileName.Contains("mega.nz") || fileName.Contains("mega.co.nz"))
+        {
+            var cleanName = fileName.Replace("_", "/").Replace(" ", "/");
+            if (!cleanName.StartsWith("http"))
+            {
+                cleanName = "https://" + cleanName;
+            }
+            return cleanName;
+        }
+
+        // その他のサービス
+        foreach (var domain in TargetDomains.Keys)
+        {
+            if (fileName.Contains(domain))
+            {
+                var cleanName = fileName.Replace("_", "/").Replace(" ", "/");
+                if (!cleanName.StartsWith("http"))
+                {
+                    cleanName = "https://" + cleanName;
+                }
+                return cleanName;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// フォルダパスからサービス/クリエイター/投稿情報を抽出
+    /// </summary>
+    private (string service, string creator, string post) ParsePathInfoFromFolder(string folderPath, string rootFolder)
+    {
+        try
+        {
+            var relativePath = Path.GetRelativePath(rootFolder, folderPath);
+            var parts = relativePath.Split(Path.DirectorySeparatorChar);
+
+            if (parts.Length >= 2)
+            {
+                var creatorFolder = parts[0];
+                var postFolder = parts[1];
+
+                var serviceMatch = ServiceCreatorRegex.Match(creatorFolder);
+                var service = serviceMatch.Success ? serviceMatch.Groups[1].Value : "";
+                var creator = serviceMatch.Success ? serviceMatch.Groups[2].Value : creatorFolder;
+
+                var postMatch = PostTitleRegex.Match(postFolder);
+                var post = postMatch.Success ? postMatch.Groups[1].Value : postFolder;
+
+                return (service, creator, post);
+            }
+        }
+        catch { }
+
+        return ("", "", Path.GetFileName(folderPath));
     }
 
     /// <summary>

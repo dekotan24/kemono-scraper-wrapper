@@ -640,15 +640,54 @@ public partial class MainForm : Form
         var artist = GetSelectedArtist();
         if (artist == null) return;
 
-        var folder = Path.Combine(_settings.OutputPath, $"[{artist.Service}] {artist.CreatorName}");
-        if (!Directory.Exists(folder))
+        // kemono-scraperの出力フォルダパターンを複数試行
+        var possibleFolders = new List<string>();
+
+        // パターン1: [service]CreatorName (スペースなし - kemono-scraper標準形式)
+        if (!string.IsNullOrEmpty(artist.CreatorName))
         {
-            folder = Path.Combine(_settings.OutputPath, $"[{artist.Service}] {artist.CreatorId}");
+            possibleFolders.Add(Path.Combine(_settings.OutputPath, $"[{artist.Service}]{artist.CreatorName}"));
         }
 
-        if (Directory.Exists(folder))
+        // パターン2: [service] CreatorName (スペースあり)
+        if (!string.IsNullOrEmpty(artist.CreatorName))
         {
-            Process.Start("explorer.exe", folder);
+            possibleFolders.Add(Path.Combine(_settings.OutputPath, $"[{artist.Service}] {artist.CreatorName}"));
+        }
+
+        // パターン3: [service]CreatorId (名前がない場合)
+        possibleFolders.Add(Path.Combine(_settings.OutputPath, $"[{artist.Service}]{artist.CreatorId}"));
+        possibleFolders.Add(Path.Combine(_settings.OutputPath, $"[{artist.Service}] {artist.CreatorId}"));
+
+        // 実際に存在するフォルダを検索
+        var existingFolder = possibleFolders.FirstOrDefault(f => Directory.Exists(f));
+
+        // パターンマッチで検索（[service]で始まるフォルダ内からCreatorIdまたはCreatorNameを含むものを探す）
+        if (existingFolder == null && Directory.Exists(_settings.OutputPath))
+        {
+            try
+            {
+                var servicePrefix = $"[{artist.Service}]";
+                existingFolder = Directory.GetDirectories(_settings.OutputPath)
+                    .FirstOrDefault(d =>
+                    {
+                        var dirName = Path.GetFileName(d);
+                        if (!dirName.StartsWith(servicePrefix, StringComparison.OrdinalIgnoreCase))
+                            return false;
+
+                        // CreatorNameまたはCreatorIdが含まれているか確認
+                        var afterService = dirName.Substring(servicePrefix.Length).TrimStart();
+                        return afterService.Equals(artist.CreatorName, StringComparison.OrdinalIgnoreCase) ||
+                               afterService.Equals(artist.CreatorId, StringComparison.OrdinalIgnoreCase) ||
+                               (!string.IsNullOrEmpty(artist.CreatorName) && afterService.Contains(artist.CreatorName, StringComparison.OrdinalIgnoreCase));
+                    });
+            }
+            catch { }
+        }
+
+        if (!string.IsNullOrEmpty(existingFolder) && Directory.Exists(existingFolder))
+        {
+            Process.Start("explorer.exe", existingFolder);
         }
         else
         {
