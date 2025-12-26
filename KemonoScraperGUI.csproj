@@ -9,6 +9,17 @@
     <ApplicationIcon>app.ico</ApplicationIcon>
     <AssemblyName>KemonoScraperGUI</AssemblyName>
     <RootNamespace>KemonoScraperGUI</RootNamespace>
+    <Title>kemono-scraper-GUI</Title>
+    <RepositoryUrl>https://github.com/dekotan24/kemono-scraper-wrapper</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|AnyCPU'">
+    <DebugType>none</DebugType>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|AnyCPU'">
+    <DebugType>none</DebugType>
   </PropertyGroup>
 
 </Project>
